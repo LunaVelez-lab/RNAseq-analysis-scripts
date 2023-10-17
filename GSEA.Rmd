@@ -1,0 +1,241 @@
+---
+title: "Gene Set Enrichment analysis GSEA"
+owner: "Luna-Velez-lab"
+output: html_document
+date: "Documented 28-07-23"
+---
+#----------------#
+## Introduction ##
+#----------------#
+This is an R Markdown file containing the workflow for performing Gene Set Enrichment Analysis (GSEA). This is an computational method that determines if a defined set of genes (also called gene signature) is statistically enriched in a list of genes that are ranked based on their difference in expression between two biological states of interest (e.g. treatment vs control)
+
+This workflow has been created using our data as example. When you want to use this workflow for your own analysis you will need to change parts of the code to make it fit to your data.
+This include: 
+- Changing file/folder paths 
+- Changing file names 
+- Possibly making different decisions along the way based on your data and your preferences 
+- Updating functions when necessary, as they might be deprecated when you use a newer version of a package
+
+#--------------------------------#
+## Installing required packages ##
+#--------------------------------#
+
+```{r }
+# When working with R in Linux, installing packages directly in R can sometimes cause problems. To work around this you can install the required packages in the environment you are running R in
+# This can for example be done using a .yaml file
+# When working with R in your own computer the packages can be directly installed in R using the code below
+
+### Installing the important repositories
+# This should be done once 
+# BiocManager can help you download packages:
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# If packages are not yet installed, install them using biocManager::install () or install.packages()
+# The packages only need to be installed once and can be activated by running the library function
+
+### Load the required packages 
+#install.packages("data.table")
+#install_github("ctlab/fgsea")
+#install.packages("devtools")
+
+library(devtools)
+library(dplyr) # Package that contains functions to manipulate the data tables 
+library(tidyr) # Package that contains functions to manipulate the data tables
+library(data.table) # Package that contains functions to manipulate the data tables
+library(fgsea) # Package needed to run SEA 
+library(ggplot2) # Package that allows for the generation of plots 
+
+```
+
+### setting up the working directory for all outputs and inputs using the R markdown
+When saving results of the workflow they can be found in this directory 
+```{r}
+# Writing the path to a directory where you want your results folder to be placed in
+dir <- "/path/to/directory/"
+
+# The code below creates a results folder in the specified dir 
+# The name of the results folder will be todaysdate_results
+# When running this command on a different date, it will again create a new folder
+dateoftoday <- gsub("-", "", as.character(Sys.Date()))
+resultsdir <- paste(dir, dateoftoday, "_results_GSEA/", sep = "")
+# Use the following command to create the results folder When working with R in linux
+system(paste("mkdir -p ", resultsdir))
+# Use the following command to create the results folder when working with R in your computer
+dir.create(file.path(resultsdir))
+
+```
+
+
+```{r "setup"}
+# Set the working directory to the newly created results folder  
+knitr::opts_knit$set(root.dir = normalizePath(resultsdir))
+# When you want to set the working directory to a results folder that already exists
+#workdir <- "path/to/resultsfolder"
+#knitr::opts_knit$set(root.dir = normalizePath(workdir))
+```
+
+#-------------------------------#
+## Creating a ranked gene file ##
+#-------------------------------#
+
+# Upload the expression data
+```{r cars}
+
+### Upload the data
+# Should be a table containing the gene names and at least one column with corresponding values that can be used to rank them 
+# For example the results table from a DESeq2 analysis
+data = read.table('/scratch/yquint/ZEB_project/SLAM-seq/GRAND-SLAM/20230614_deseq2/Total_RNA_results/DE_totalRNA_results_all_unique_shrink.txt', sep = "\t", stringsAsFactors = F, header = TRUE)
+
+```
+
+# Ranking the genes
+```{r}
+### Selecting the columns of interest (gene names + a value to rank them by)
+# In the example below the gene names are stored in a column named "geneID" and the ranked value that are used are the log2foldchange values for a comparison of interest stored in a column named log2FoldChange_WT_UT_vs_Z1_2_24h 
+data_subset = dplyr::select(data, GeneID, log2FoldChange_WT_UT_vs_Z1_2_24h)
+# The log2fold change (log2FC)is a value that represent the difference in expression between two biological states (one over the other)
+# Often times it is treatment over control (treatment vs control) where a positive log2fC means that the gene is expressed higher in treatment compared to control and a negative log2FC means it is lower expressed in the treatment compared to the control
+# Sometimes the comparison might be the other way around:  control vs treatment
+# If that is the case, to prevent confusion later you can reverse the comparison (to treatment vs control) by multiplying the lo2fc values by -1 
+data_subset$log2FoldChange_correct = data_subset$log2FoldChange_WT_UT_vs_Z1_2_24h*-1
+
+### Order the genes based on the chosen value 
+# Rank the genes form highest to lowest based on the rank value
+# Assign the gene names as rownames
+data_subset_ordered = data_subset[order(data_subset$log2FoldChange_correct, decreasing = TRUE),]
+row.names(data_subset_ordered ) = data_subset_ordered$GeneID
+
+# Save the ordered subsetted data table as a .rnk file (neededfor the GSEA)
+write.table(data_subset_ordered , file = "genes_ordered_GSEA.rnk", sep = "\t",
+            col.names = FALSE, row.names = FALSE)
+
+```
+
+
+## Load the data for the GSEA ##
+
+# Load the .rnk file(s)
+To be able to run GSEA you need a .rnk file containing the ranked genes. One way of getting these files extensions is by saving that data as .rnk files and loading them again in R to run the GSEA. So the files that were created in the previous chunk can be loaded in this chuck to continue the workflow
+```{r}
+### Load your rank data 
+# Convert the ranked values to a numeric list
+# Assign to each ranked value the corresponding gene name
+Rank <- read.table("genes_ordered_GSEA.rnk",
+                         header=FALSE, colClasses = c("character", "numeric"))
+Rank_list <- as.numeric(Rank[,2])
+names(Rank_list) <- Rank[,1]
+
+#check the sturcture of the rank_list
+str(Rank_WT_list)
+
+```
+
+# Load the gene signature of interest 
+```{r}
+### Load the signature
+# You can get signatures from the molecular signatures database of the Broad institute : <https://www.gsea-msigdb.org/gsea/msigdb/index.jspeither> 
+# Or you can use signatures that you created yourself 
+# If the latter make sure that the signatures are in the correct format see <https://docs.gsea-msigdb.org/#GSEA/Data_Formats/>
+
+gene_signatures<- gmtPathways("/path/to/gene_signature.gmt")
+str(head(gene_signature))
+
+# Or if you have multiple .gmt files containing only one of few gene signature(s), you can combined them to allow GSEA for all of them at the same time 
+# specify the direcotry where the gmt files are located
+# get a list of the gmt files of interest by specifying a pattern that is resent in the file names of all those files
+dir = "/scratch/yquint/ZEB_project/Blueprint/signature top250 based on TPMs for each cell type/"
+gtmfiles <- list.files(dir, pattern = ".gmt")
+# run over the list of files, read the signatures and add them to the gtm_list
+gene_signatures  <- list()
+for (file in gtmfiles) {
+  setwd(dir)
+  gmt_file <- gmtPathways(file)
+  gene_signatures <- append(gene_signatures, gmt_file)
+  
+}
+
+```
+
+#----------------#
+## perform GSEA ##
+#----------------#
+
+```{r}
+### Run GSEA
+# Run the GSEA to get a table with the results ( p values and enrichment scores) for each gene signature containing:
+# the name of thegene signature, an enrichment p-value (pval), a BH-adjusted p-value (padj), the expected error for the standard deviation of the P-value logarithm (log2err),
+# enrichment score (ES), enrichment score normalized to mean enrichment of random samples of the same size (NES), size of the pathway after removing genes not present in the ranked gene list (size) and 
+# a vector with indexes of leading edge genes that drive the enrichment
+# You can specify the minimum size ( minSize) and maximum size (maxSize) for a gene signature to be included for GSEA
+fgseaRes <- fgsea(c(gene_signatures), Rank_list, minSize=15, maxSize=500, eps = 0.0)
+head(fgseaRes)
+#save the results table 
+fwrite(fgseaRes, file="Results_GSEA.txt", sep="\t")
+
+### visulaize the GSEA results 
+# Creating a table plot to visualize the GSE results for multiple selected pathways
+plotGseaTable(c(gene_signatures), Rank_list, fgseaRes, 
+              gseaParam=0.5)
+# A significant positive NES value: genes in that particular gene set tend to appear in the top of the the ranked gene list (= upregulated genes)
+# A significant negative NES indicates the opposite 
+
+# Or if your list of genes signatures is very big you can select the most significantly enriched signatures among the upregulated and downregulated genes to be plotted
+topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+
+plotGseaTable(gene_signatures[topPathways], Rank_list, fgseaRes, gseaParam=0.5)
+
+# Create an enrichment plot for one specific gene signature of interest 
+# It will show the enrichment score for each ranked gene
+plotEnrichment(gene_signatures[["name_of_the_signature_of_interest"]],
+               Rank_list) + labs(title = "name_of_the_signature")
+
+# Creating a pdf of the plot
+# The pdf will be saved in the results folder
+pdf(file = "Enrichment_plot_of_signature_of_interest.pdf" )
+plotEnrichment(gene_signatures[["name_of_the_signature_of_interest"]],
+               Rank_list) + labs(title = "name_of_the_signature")
+dev.off()
+
+```
+
+### Making nice result plots using ggplot
+```{r}
+### Creating a bubble plot showing teh pvalue and NES score of the enriched signatures 
+# The input should be the fgseaRes results (of one of more conditions) with an additional column (named "condition") specifying the condition(s)
+plot <- ggplot(fgseaRes, aes(x= condition ,y = signatures)) +
+  geom_point(aes( size = -log10(padj), fill = NES), shape = 21) +
+  scale_fill_gradient2(low = "blue", mid= "white", high = "red") +
+  theme_bw() +
+  theme(panel.background = element_rect(colour = "black")) +
+  theme(axis.text.x = element_text(colour = "black", 
+                                   size = 10,
+                                   face = "bold",
+                                   angle = 0, 
+                                   vjust = 0.3,
+                                   hjust = 1)) +
+  theme(axis.text.y = element_text(colour = "black",
+                                   face = "bold",
+                                   hjust = 1,
+                                   size = 8,
+                                   vjust = 0.5)) +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())+
+  theme(axis.title = element_blank())
+
+# Print the plot in Rstudio
+plot
+
+# Save the plot in the results folder as a PDF
+pdf(file = "bubble_plot_GSEA_results_fgseaRes.pdf" )
+plot
+dev.off()
+
+
+```
+

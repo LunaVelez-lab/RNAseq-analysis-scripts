@@ -1,0 +1,512 @@
+---
+title: "Analysing RNA count tables using DESeq2"
+owner: "Luna-Velez-lab"
+date: "Documented 31-05-2023"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+#----------------#
+## Introduction ##
+#----------------#
+This is an R Markdown file showing the workflow for analyzing RNA count tables using DESeq2. The input can either be a combined count table containing all samples or separate count tables for each sample.
+
+This workflow has been created using our data as example. When you want to use this workflow for your own analysis you will need to change parts of the code to make it fit to your data.
+This includes: 
+- Changing file/folder paths 
+- Changing file names 
+- Modifying manually set thresholds so they make sense for your data (e.g. filtering out low-expressed genes)
+- Changing metadata input variables for quality assessment as they might be different/ differently named for your data
+- Possibly making different decisions along the way based on your data and your preferences 
+- Updating functions when necessary, as they might be deprecated when you use a newer version of DESeq2 (> 1.26.0)
+
+#--------------------------------#
+## Installing required packages ##
+#--------------------------------#
+
+```{r , iclude=FALSE}
+# When working with R in Linux, installing packages directly in R can sometimes cause problems. To work around this you can install the required packages in the environment you are running R in
+# This can for example be done using a .yaml file
+# When working with R in your own computer the packages can be directly installed in R using the code below
+
+### Installing the important repositories
+# This should be done once 
+# BiocManager can help you download packages:
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# If packages are not yet installed, install them using biocManager::install () or install.packages()
+# The packages only need to be installed once and can be activated by running the library() function
+#BiocManager::install("dplyr")
+#BiocManager::install("ComplexHeatmap")
+
+library(DESeq2)
+library(ComplexHeatmap)# package used to create heatmaps
+library(circlize) # package used to set custom colors in the heatmap
+library(biomaRt)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(apeglm)
+
+```
+
+### setting up the working directory for all outputs and inputs using the R markdown
+When saving results of the pipeline they can be found in this directory 
+```{r, include=FALSE}
+# Writing the path to a directory where you want your results folder to be placed in
+dir <- "/path/to/directory/"
+
+# The code below creates a results folder in the specified dir 
+# The name of the results folder will be todaysdate_results
+# When running this command on a different date, it will again create a new folder
+dateoftoday <- gsub("-", "", as.character(Sys.Date()))
+resultsdir <- paste(dir, dateoftoday, "_results_DESeq2/", sep = "")
+# Use the following command to create the results folder When working with R in linux
+system(paste("mkdir -p ", resultsdir))
+# Use the following command to create the results folder when working with R in your computer
+dir.create(file.path(resultsdir))
+
+```
+
+```{r "setup"}
+# Set the working directory to the newly created results folder  
+knitr::opts_knit$set(root.dir = normalizePath(resultsdir))
+# When you want to set the working directory to a results folder that already exists
+#workdir <- "path/to/resultsfolder"
+#knitr::opts_knit$set(root.dir = normalizePath(workdir))
+```
+
+#--------------------------#
+## Collect the (meta)data ##
+#--------------------------#
+
+# Collecting the count table(s)
+Either one RNA-seq count table of all the samples or multiple count tables; one for each sample
+```{r}
+### Loading the count table of all the samples 
+countData_total <- read.table("/path/to/count_table.txt", sep='\t', header=TRUE)
+
+### Collecting the count tables of each sample 
+# Specify the directory that contains the count tables
+count_dir = "/path/to/directory/"
+# Extract the names of all count table files from the specified directory
+# With the "pattern" argument you can select for file containing a certain pattern in their name. Only filenames matching the pattern will be returned
+sampleFiles = list.files(dir, pattern="txt")
+
+
+### Transcript ID to Gene symbol annotation table
+# When the count table(s) contains transcript IDs that you want to convert to gene symbols you will need a table contaning the transcript IDs and their matching gene symbol
+# These tabels can for example be ownloaded from biomart
+maptab = read.csv('/path/to/biomart_table.csv', sep = ',', stringsAsFactors = F)
+```
+ 
+# Collect the metadata of your samples 
+Create a cell metadata table from either (1) colnames of the count table or (2) the filenames of the count tables or (3) just upload a metadata table directly
+The metadata table needs to contain at least the samplenames and sampleConditions
+```{r}
+### (1) Extracting metadata from the colnames of the count table 
+# Sometimes the colnames contain metadata of the different samples
+# This metadata can be extracted to create a sample metadata table 
+# As the colnames of each dataset differ you will need to change the code below for it to match the colnames of your count table 
+# First remove parts of the colnmames that do not contain metadata information
+# In the example below the word "bulkRNAseq" was part of the colnames 
+colnames_total = gsub("bulkRNAseq", "", colnames(countData_total))
+# Next extract the samplenames and sampleconditons
+# In the example below the sampleCondition can be extracted from the sampleNames by only keeping what is stated before the "_"
+sampleNames = colnames_total
+sampleConditions = gsub(".*_", "", sampleNames )
+#Create a table with the samplenames and conditions
+# When you have more metadata available you can add it to the table
+sampleTable = data.frame(sampleName = sampleNames,
+                          condition = sampleConditions)
+
+# ### (2) Extracting metadata from filenames
+# # When you have multiple count tables (one for each sample) often times the filenames contain metadata of the samples
+# # This metadata can be extracted to create a sample metadata table 
+# # You can extract this data from the filenames by modifying the code blow to make it fit to your filenames
+# # First remove parts of the filenames that do not contain metadata information
+# # In the example below the word bulkRNAseq was part of the colnames as well as the file type
+# colnames_total = gsub("bulkRNAseq.tsv", "", sampleFiles)
+# # Next extract the samplenames and sampleconditons
+# # In the example below the sampleCondition can be extracted from the sampleNames by only keeping what is stated before the "_"
+# sampleNames = colnames_total
+# sampleConditions = gsub(".*_", "", sampleNames )
+# # Create a table with the samplenames, filenames and conditions
+# # When you have more metadata available you can add it to the table
+# sampleTable_total = data.frame(sampleName = sampleNames_total,
+#                          fileName = sampleFiles_total,
+#                           condition = sampleConditions_total)
+# 
+# 
+# ### (3) Uploading the metadat table
+# # If your datatable has column names set the "header"" argument for the read.table to TRUE
+# # Create from the metadata_samples table a table named sampleTable that contains the samplename and condition of each sample
+# # When you have multiple files with counts you also need to specify the filename of each sample
+# # Make sure the column names are named sampleName, condition and fileName 
+# # When you have more metadata available it can also be put in the table
+# metadata_samples =  read.table("/scratch/yquint/ZEB_project/SLAM-seq/GRAND-SLAM/20230614_deseq2/metadata_slamseq_samples.tsv", sep='\t', header=TRUE)
+# colnames(metadata_samples)= c("fileName", "sampleName", "condition", "time")
+# sampleTable = metadata_samples
+
+```
+
+
+#------------------#
+## Deseq analysis ##
+#------------------#
+
+# Create a deseq object
+Either using the count table with all samples or by combining the seperate count tables of each sample together
+``` {r dds object}
+### When you already have one count table that contains all the samples 
+# Make sure the rownames of the metadata are the same as the colnames of your count table 
+rownames(sampleTable)<- sampleTable$SampleNames
+
+dds <- DESeqDataSetFromMatrix(
+  countData_total, # A matrix containing the counts
+  sampleTable, # A matrix with metdata where the rows correspond to the column of the countData
+  design= ~ condition #to specify which comparison deseq2 should make, in this case you want deseq to compare conditions
+)
+
+### Combining the separate count tables into one deseq object
+# dds = DESeqDataSetFromHTSeqCount(
+#   sampleTable = sampleTable, # The created sampleTable containing the metadat
+#   directory = dir, # The directory that contains the count tables
+#   design= ~ condition) #to specify which comparison deseq2 should make, in this case you want deseq to compare conditions
+
+# Save the deseq object as an R object
+# This allows you to preserve the state of the object at this specific point during the analysis 
+# When loading this R object into R the next time you are working on the analysis you can continue from where you left off 
+saveRDS(dds_total, "dds.rds")
+
+
+```
+
+# Get a table with the raw data
+```{r}
+### Extract the raw counts form the dss object
+raw_counts_total <- as.matrix(dds@assays@data@listData[["counts"]])
+
+#### Converting the transcript ID to gene IDs using the maptab table
+# Match the transcript IDs in the maptab table to the rownames of the count data, retuns a list of postions where the first argument matches in its second
+Tablematch = match(rownames(raw_counts_total), maptab$ID_version, nomatch = NA_integer_, incomparables = NULL)
+Genes = maptab$Gene_name[Tablematch]
+# Check to see if the matching has worked
+maptab$ID_version[Tablematch] == rownames(raw_counts_total)[1]
+# Set the matched gene names as rownames in the raw_count_total
+rownames (raw_counts_total) <- Genes
+
+# Save the raw counts table 
+write.table(raw_counts_total, file = "Deseq2_ReadCount_raw_counts.txt",sep = "\t",
+            row.names = TRUE, col.names = NA, quote = FALSE)
+```
+
+# Filter out low expressed genes
+Before running the deseq analysis you can already set some cutoffs to remove genes with only few counts accross all samples
+```{r Filtering }
+# Remove the genes which have less than "threshold" counts accorss all  sample 
+threshold = 10 
+dds = dds[rowSums(counts(dds)) >= threshold] 
+# From .. to . genes
+
+```
+
+# Run the deseq analysis
+```{r}
+# Loading the dds R Object to continue the analysis from this point 
+dds = readRDS("dds.rds")
+
+### Perform deseq analysis 
+dds_DE_total = DESeq(dds_total)
+# Estimating size factors
+# Estimating dispersions
+# Gene-wise dispersion estimates
+# Mean-dispersion relationship
+# Final dispersion estimates
+# Fitting model and testing
+
+
+# Save the dds_DE R objects to be able to later continue the analysis from this point
+saveRDS(dds_DE_total, "dds_DE.rds")
+
+```
+
+
+# Transforming the count table 
+```{r rlog transformation}
+### Regularized log transformation
+# The rlog or rlogTransformation function of DESeq2 transforms the raw counts to log2 scale and inherintly accounts for differences in sequencing depth 
+logtransformed_counts_total <- as.matrix(assay(rlogTransformation(dds_DE_total, blind = F)))
+
+### Converting the transcript ID to gene IDs using the maptab table
+# Match the transcript IDs in the maptab table to the rownames of the count data, retuns a list of postions where the first argument matches in its second
+Tablematch = match(rownames(logtransformed_counts_total), maptab$ID_version, nomatch = NA_integer_, incomparables = NULL)
+Genes = maptab$Gene_name[Tablematch]
+# Check to see if the matching has worked
+maptab$ID_version[Tablematch] == rownames(logtransformed_counts_total)[1]
+# Set the matched gene names as rownames in the raw_count_total
+rownames (logtransformed_counts_total) <- Genes
+
+# Save the log2 transformed counts table 
+write.table(logtransformed_counts_total, file = "Deseq2_logtransformed_totalRNAcounts_total.txt",sep = "\t",
+            row.names = TRUE, col.names = NA, quote = FALSE)
+
+```
+
+#------------------------------------------------------------#
+## Idenifying the significant differentialy expressed genes ##
+#------------------------------------------------------------#
+
+# Create the functions needed to extract the results from the deseq2 DE object
+This can either be the results containing the normal log2 fold change (LFC) values or the shrunken LFC values using the functions results() or lfcShrink() respectively. 
+
+The lfcShrink() function returns a result tables including the basemean, shrunken LFC values, p values and adjusted pvalue. Shrinkage of the effect size (LFC estimates) is useful for visualization and ranking of the genes. The lfcShrink function looks at the largest fold changes that are not due to low counts and uses these to inform a prior distribution. So the large fold changes from genes with lots of statistical information are not shrunk, while the imprecise fold changes are shrunk. This allows you to compare all estimated LFC across experiments, for example, which is not really feasible without the use of a prior.
+
+According to one fo the developers of deseq2 (< https://support.bioconductor.org/p/77461/ >) 
+One should not use the lfcShrink function when it is expected that nearly all genes will show no change between conditions and there is little to no variation across replicates (so near technical replication), and then say < 10 genes with very large fold changes. Possible for non-biological samples, for example technical replicates plus DE spike ins. In that case you should use the results() function of deseq2 to get the result tables. 
+
+The adaptive shrinkage estimators apeglm (default)(Zhu, Ibrahim, and Love 2018) and ashr (Stephens 2016) seem to perform the best. The apeglm method works only with coefficients as input, ashr works with both coefficients and contrasts. Their difference between coefficietns and contrasts is explained here < https://support.bioconductor.org/p/98833/#:~:text=Specifically%2C%20the%20old%20%22contrast%22,is%20the%20numerator%20of%20LFC) > 
+When you have one specific reference you want to use for all your comparisons it is easiest to use the coefficients. When you have a large dataset with multiple references it might be easier to use the contrasts as they can be set manually.  
+
+
+```{r}
+### (1) Function to get a data frame with all Deseq results (lfcShrink ()) from coefficients of interest
+# Using either the apeglm or the ashr method
+# Input is a list of coefficients you want the results from + the dds object
+get_shrink_apeglm= function(coefs, dds_object){
+  
+  res = sapply(coefs, function(x){
+    print(x)
+    result = lfcShrink(dds_object, coef = x , type= "apeglm")
+    result = lfcShrink(dds_object, coef = x , type= "ashr")
+    colnames(result) = paste(colnames(result), x , sep = '_')
+    result$GeneID = rownames(result)
+    return(result)
+  }
+  )
+  # converting the DESeq object to a data frame
+  sig = lapply(seq_along(res), function(x){
+    r = as.data.frame(res[[x]])
+    return(r)
+  })
+  output = Reduce(function(x,y) merge(x, y, by = 'GeneID', all = T), sig)
+  return(output)
+
+}
+
+
+
+### (2) Function to get a data frame with all Deseq results from all comparison (of interest) using contrasts
+# Either containing the normal log2 fold changes ( results() )  or the shrunken log2 fold changes using the "ashr" method (lfcShrink)
+# Input is a table  with 2 rows and x columns where each column represents a possible comparison between two conditions + the dds object
+# get_results= function(Cond_Comb, dds_object){
+#   
+#   res = apply(Cond_Comb, 2, function(x){
+#     result = lfcShrink(dds_object, contrast = c('condition', x[1], x[2]), type="ashr") # shrink
+#     #result = results(dds_DE, contrast = c('condition', x[1], x[2])) # normal
+#     colnames(result) = paste(colnames(result), x[1], 'vs', x[2], sep = '_')
+#     result$GeneID = rownames(result)
+#     return(result)
+#   }
+#   )
+#   # converting the Deseq object to a data frame
+#   sig = lapply(seq_along(res), function(x){
+#     r = as.data.frame(res[[x]])
+#     return(r)
+#   })
+#   output = Reduce(function(x,y) merge(x, y, by = 'GeneID', all = T), sig)
+#   return(output)
+#  
+# }
+
+
+```
+
+# Use the functions to extract the results from the dds_DE object
+Shrinking the data will only have an effect on log2fold changes, it will not change the p-values that are calculated by the DESeq()
+```{r}
+# Loading the dds_DE R object to continue the analysis from this point 
+#dds_DE <- readRDS("dds_DE.rds")
+
+### (1) Get the results table containing the results of all comparisons (of interest) using coefficients
+# Listing the available coefficients using the resultNames; by default Deseq2 will choose a reference (control) based on alphabetical order
+# If needed reset the reference level the coefficients are based on using the relevel() function by specifying a reference factor of you own choice using the "ref" argument
+# Followed by recalculating the nbinomWarldTest to re-estimate the MLE coefficients
+resultsNames(dds_DE_total)
+dds_DE_total$condition <- relevel(dds_DE_total$condition, ref = "reference_factor")
+dds_DE_total <- nbinomWaldTest(dds_DE_total)
+resultsNames(dds_DE_total)
+# Selecting the coefficients of interest to used as input for the function
+# In the example below every coefficient in the resultNames() except the intersect is selected
+# The package apeglm need to be loaded for the get_shrink_apeglm() function to work
+coefficients_of_interest <- resultsNames(dds_DE_total)[-1]
+DE_results_all = get_shrink_apeglm(coefficients_of_interest, dds_DE_total )
+# Using 'apeglm' for LFC shrinkage. If used in published research, please cite:
+#     Zhu, A., Ibrahim, J.G., Love, M.I. (2018) Heavy-tailed prior distributions for
+#     sequence count data: removing the noise and preserving large differences.
+#     Bioinformatics. https://doi.org/10.1093/bioinformatics/bty895
+
+### Visualizing the (un)shrunken log2fold values of one comparison
+# The input for the plotMA() function is a Deseq2 object of one comparison meaning the results() or lfShrink() function need to be run again
+# Change the contrast and coefficient so they represent a comparison of interest
+result_normal = results(dds_DE_total, contrast = c('condition', "treatment", "reference_factor"))
+result_shrik_apeglm = lfcShrink(dds_DE_total, coef = "condition_treatment_vs_reference_factor", type= "apeglm")
+result_shrink_ash = lfcShrink(dds_DE_total, contrast = c('condition', "treatment", "reference_factor"), type="ashr")
+# Plotting the mean of the normalized counts versus the log2 fold changes for all genes
+# The genes that are significantly expressed are colored blue
+plotMA(result_normal,  ylim=c(-5,5), main = "unshrunken")
+plotMA(result_shrik_apeglm,  ylim=c(-5,5), main = "apeglm")
+plotMA(result_shrink_ash,  ylim=c(-5,5), main = "ashr")
+
+
+### (2) Get the results table containing the results of all comparisons (of interest) using contrasts
+# Either containing the normal log2 fold changes or the shrunken log2 fold changes using the "ashr" method based on the details specified in the function
+# The function requires as input table with all comprisons of interset with 2 rows and x columns where each column represents a possible comparison between two conditions
+#Cond_Comb= as.matrix(combn(unique(sampleTable$condition), 2)) # create a table with all possible comparison
+#DE_results_all = get_results(Cond_Comb, dds_DE_total ) 
+# Using 'ashr' method for LFC shrinkage. If used in published research, please cite:
+    # Stephens, M. (2016) False discovery rates: a new deal. Biostatistics, 18:2.
+    # https://doi.org/10.1093/biostatistics/kxw041
+
+### Troubleshooting;
+# Some values are NA, either (1) due to a gene having zero counts, (2) a gene has a sample with an extreme count outlier, or (3) if a row is filtered by automatic independent filtering (low mean normalized count)
+
+
+#### Converting the transcript ID to gene IDs using the maptab table
+# Match the transcript IDs in the maptab table to the rownames of the count data, retunrs a list of positions where the first argument matches in its second
+Tablematch = match(DE_results_all$GeneID, maptab$ID_version, nomatch = NA_integer_, incomparables = NULL)
+Genes = maptab$Gene_name[Tablematch]
+# Check to see if the matching has worked
+maptab$ID_version[Tablematch] == DE_results_all$GeneID
+# Set the matched gene names as rownames 
+rownames(DE_results_all) <- Genes
+
+
+### When you have duplicate gene names (isoforms) you can select the dominant isoform based on baseMean 
+# Basemean: mean normalized count of all samples normalized using the size factor 
+# Deseq made the names unique by introducing a dot(.) and a number, these need to be removed first
+# Then group genes based on their name and select the one with the highest baseMean by arranging them based on a baseMean column from the result table
+DE_results_all$GeneID_isoforms <-gsub("\\.[0-9]+", "", DE_results_all$GeneID)
+
+DE_results_all <- as.data.frame(DE_results_all %>%
+                                   group_by(GeneID_isoforms) %>%
+                                   arrange(desc(baseMean_condition1_vs_condition2), .by_group = T ) %>%
+                                   filter(row_number()==1))
+
+# Save the deseq results table  
+write.table(DE_results_all, file = "DE_RNA_results_all_unique.txt", sep = "\t",
+             row.names = TRUE, col.names = TRUE)
+# Save the R deseq results table objects to be able to later continue the analysis from this point
+saveRDS(DE_results_all, "DE_results_all_unique.rds")
+
+```
+
+# Subset the logtransformed counts
+```{r}
+### Subset the logtransformed counts to get a transformed table for the genes in the DE_results_all 
+# Select the dominant isoforms by subseting by GeneID 
+countsTable_total = logtransformed_counts_total[rownames(logtransformed_counts_total) %in% DE_results_all$GeneID,]
+# For downstream analysis remove the dot (.) and number introduced by deseq2 (if duplicated names were present)
+#rownames(countsTable_total) <-gsub("\\.[0-9]+", "", rownames(countsTable_total))
+
+# Save the subsetted log2transformed counts 
+write.table(countsTable_total, file = "logtransformed_RNA_counts_all_unique.txt", sep = "\t",
+             row.names = TRUE, col.names = TRUE)
+
+```
+
+# Selecting genes based on a set padj value
+```{r}
+### Selecting genes that have a p-adjusted value below the set threshold for at least one of the comparisons in the Cond_Comb object 
+# Creating a list of the column names from the DE_results_all table containing padj values from 
+# Selecting only the rows where a gene has a p-adjusted value < padj_value in at least one of the padj_columns 
+# Removing rows consisting of only NAs, introduced by the above command if the row contains an NA 
+padj_columns = na.omit(str_extract(colnames(DE_results_all), pattern="padj.*")) 
+padj_value <- 0.05 #set here the padj value threshold of interest
+DE_results_all_padj<- DE_results_all[Reduce(`|`, lapply(DE_results_all[, c(padj_columns)], function(x) x < 0.05)) ,]
+DE_results_all_padj<-DE_results_all_padj[rowSums(is.na(DE_results_all_padj)) != ncol(DE_results_all_total_padj),]
+
+# Save the DESeq2 results subsetted to only contain the significant differentialy expressed genes 
+write.table(DE_results_all_padj, file = "DE_RNA_results_padj0.05_unique.txt", sep = "\t",
+             row.names = TRUE, col.names = TRUE)
+saveRDS(DE_results_all_total_padj, "DE_RNA_results_padj0.05.rds")
+
+
+
+### Get a count table containing the logtransformed counts for the genes in the DE_results_all_padj 
+countsTable_padj = countsTable_total[rownames(countsTable_total) %in% DE_results_all_padj$GeneID,] 
+
+write.table(countsTable_padj, file = "logtransformed_RNA_counts_padj0.05_unique.txt", sep = "\t",
+             row.names = TRUE, col.names = TRUE)
+
+``` 
+
+# Visualizing the genes selected based on a set padj value 
+```{r}
+### Create a heatmap of the selected genes using the logtransformed data 
+# Often times scaling the data (z-transformation) across samples, using the scale() function makes for nicer figures 
+# The scale() function scales the columns, so to allow for scaling across samples the matrix needs to be transposed
+# After the transformation the table is transposed back  
+
+Heatmap(t(scale(t(countsTable_padj))), show_row_dend = FALSE, show_row_names = FALSE,  name = "Z score")
+
+```
+
+# Adding rowclusters to your heatmap
+You can cluster the rows using kmeans, which is a method where clusers are defined so that the total intra-cluster variation (known as total within-cluster variation) is minimized
+```{r}
+# Create a plot so see the number of rowclusters that would add information to your data. 
+# This is similar to an similar to an elbowplot
+# The place where the elbow lands (=where the curve is located) is the threshold for the number of rowclusters that explain the the data variance
+wss <- (nrow(countsTable_padj)-1)*sum(apply(countsTable_padj,2,var))
+for (i in 2:20) wss[i] <- sum(kmeans(countsTable_padj,centers=i)$withinss)
+plot(1:20, wss, type="b", xlab="Number of Clusters",ylab="Within groups sum of squares")
+# In the example below the number of chosen rowcluster is 5 (because the elbow in the plot landed at 5 )
+km <- kmeans(t(scale(t(countsTable_padj))),  5, iter.max=100, nstart=25)
+
+# Create the heatmap, but use the gene clusters saved in the km object to split the rows and create the rowclusters
+Heatmap(t(scale(t(countsTable_padj))), split = paste0("km", km$cluster), name = "Z score")
+
+```
+
+# Selecting and visualizing the significant differentialy expressed genes for a specific comparisons of interest 
+```{r}
+# Loading table with the DESeq2 results and the table with the logtransformed data to continue the analysis from this point 
+#DE_results_all_padj = read.table("DE_RNA_results_padj0.05_unique.txt", sep = "\t")
+#countsTable_padj <- read.table( "logtransformed_RNA_counts_padj0.05_unique.txt", sep = "\t")
+
+### Select the significantly differentialy epxressed genes for the comparisons of interest
+# Then select from the logtransformed data only the rows corresponding to those genes
+# And the columns corresponding to the comparison of interest
+padj_value <- 0.05 #set here the padj value threshold of interest
+DE_subset = DE_results_all_padj[DE_results_all_padj$padj_drug_vs_control <padj_value,] 
+DE_subset<-DE_subset[!is.na(DE_subset$padj_drug_vs_control), ]#remove the NA's that are introduced
+countsTableDE_subset = countsTable_padj[rownames(countsTable_padj) %in% DE_subset$GeneID, ]
+OnlyDE_subset<- subset(countsTableDE_subset, TRUE, c(9:10, 11:12, 13:14, 15:16))#68
+# TablematchDE_subset = match(rownames(countsTableDE_subset), maptab$ID_version, nomatch = NA_integer_, incomparables = NULL)
+# GenesDE_subset = maptab$Gene_name[TablematchDE_subset]
+# GenesDE__subset[1]
+# rownames(countsTableDE_subset)[1]
+# rownames (countsTableDE_subset) <- GenesDE_subset
+
+# Save the results 
+write.table(DE_subset, file = "DE_RNA_results_padj0.05_padj_control_vs_drug.txt", sep = "\t",
+             row.names = TRUE, col.names = TRUE)
+
+### Visualize the significant differentialy expressed genes of the comparisons of interest in a heatmap
+# Perform a Z-transformation on the rows by using the scale() function
+# To perform Z -transformation the countsTable_total_padj table needs to be transposed t()
+# After the transformation the table is transposed back 
+
+Heatmap(t(scale(t(OnlyDE_subset))), show_row_dend = FALSE, show_row_names = FALSE,  name = "Z score") 
+# The rows represent the genes
+# The columns represent the samples
+
+
+```
+
+
+
