@@ -1,2 +1,2 @@
 # RNAseq-analysis-scripts
-General scripts for analyzing RNAseq
+This repository contains scripts for analysing and RNAseq data
