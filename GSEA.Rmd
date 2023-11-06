@@ -85,7 +85,7 @@ knitr::opts_knit$set(root.dir = normalizePath(resultsdir))
 ### Upload the data
 # Should be a table containing the gene names and at least one column with corresponding values that can be used to rank them 
 # For example the results table from a DESeq2 analysis
-data = read.table('/scratch/yquint/ZEB_project/SLAM-seq/GRAND-SLAM/20230614_deseq2/Total_RNA_results/DE_totalRNA_results_all_unique_shrink.txt', sep = "\t", stringsAsFactors = F, header = TRUE)
+data = read.table('DE_totalRNA_results_all_unique_shrink.txt', sep = "\t", stringsAsFactors = F, header = TRUE)
 
 ```
 
