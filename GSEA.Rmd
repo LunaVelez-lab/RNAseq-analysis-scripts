@@ -31,12 +31,12 @@ This include:
 if (!requireNamespace("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 
-# If packages are not yet installed, install them using biocManager::install () or install.packages()
+# If packages are not yet installed, install them using BiocManager::install () or install.packages()
 # The packages only need to be installed once and can be activated by running the library function
 
 ### Load the required packages 
 #install.packages("data.table")
-#install_github("ctlab/fgsea")
+#BiocManager::install("fgsea")
 #install.packages("devtools")
 
 library(devtools)
