@@ -205,7 +205,7 @@ dev.off()
 ```{r}
 ### Creating a bubble plot showing teh pvalue and NES score of the enriched signatures 
 # The input should be the fgseaRes results (of one of more conditions) with an additional column (named "condition") specifying the condition(s)
-plot <- ggplot(fgseaRes, aes(x= condition ,y = signatures)) +
+plot <- ggplot(fgseaRes, aes(x= condition ,y = pathway)) +
   geom_point(aes( size = -log10(padj), fill = NES), shape = 21) +
   scale_fill_gradient2(low = "blue", mid= "white", high = "red") +
   theme_bw() +
